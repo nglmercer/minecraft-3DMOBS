@@ -1,11 +1,6 @@
 import * as THREE from 'three';
 import { MinecraftModel, MinecraftGeometry, Bone, Cube, Vector3, AdvancedUV, FaceUV, isAdvancedUV, isSimpleUV } from '../types/MinecraftModel';
 
-interface ModelCreationOptions {
-  flipUvY?: boolean;
-  isPlayerModel?: boolean;
-}
-
 export class ModelParser {
   static parseModel(modelData: MinecraftModel): MinecraftGeometry | null {
     console.log('Parsing model data:', modelData);
@@ -14,10 +9,8 @@ export class ModelParser {
       // Handle new format (minecraft:geometry array)
       if (modelData['minecraft:geometry'] && Array.isArray(modelData['minecraft:geometry'])) {
         const geometry = modelData['minecraft:geometry'][0];
-        console.log('Found new format geometry:', geometry);
-        
         if (geometry && geometry.description && geometry.bones) {
-          return geometry;
+            return geometry;
         }
       }
             
@@ -45,45 +38,28 @@ export class ModelParser {
       console.error('Error parsing model:', error);
       return null;
     }
-  };
+  }
 
   static createThreeJSModel(
-    geometry: MinecraftGeometry, 
+    geometry: MinecraftGeometry,
     texture?: THREE.Texture,
-    options: ModelCreationOptions = {}
   ): THREE.Group {
-    const { flipUvY = true, isPlayerModel = true } = options;
-    console.log("options", options);
     
     const modelGroup = new THREE.Group();
-    const boneMap = new Map<string, THREE.Group>();
-    
-    // CORRECCIÓN 1: Ajustar las posiciones de los bones (pivots)
+    const boneMap = new Map<string, THREE.Object3D>();
+
+    // PASO 1: Crear todos los huesos sin aplicar transformaciones aún
     geometry.bones.forEach(boneInfo => {
-      const bone = new THREE.Group();
-      bone.name = boneInfo.name;
-
-      if (boneInfo.pivot) {
-        const pivotX = isPlayerModel ? -boneInfo.pivot[0] : boneInfo.pivot[0];
-        // CAMBIO PRINCIPAL: Reducir la escala del eje Y y corregir la dirección
-        const pivotY = (boneInfo.pivot[1] / 16) * 0.1; // Reduce la separación vertical
-        const pivotZ = boneInfo.pivot[2] / 16;
-        
-        bone.position.set(pivotX / 16, pivotY, pivotZ);
-      }
-
-      if (boneInfo.rotation) {
-        const rotX = isPlayerModel ? -THREE.MathUtils.degToRad(boneInfo.rotation[0]) : THREE.MathUtils.degToRad(boneInfo.rotation[0]);
-        const rotY = isPlayerModel ? -THREE.MathUtils.degToRad(boneInfo.rotation[1]) : THREE.MathUtils.degToRad(boneInfo.rotation[1]);
-        const rotZ = THREE.MathUtils.degToRad(boneInfo.rotation[2]);
-        bone.rotation.set(rotX, rotY, rotZ);
-      }
-      boneMap.set(boneInfo.name, bone);
+      const boneGroup = new THREE.Group();
+      boneGroup.name = boneInfo.name;
+      boneMap.set(boneInfo.name, boneGroup);
     });
 
+    // PASO 2: Construir la jerarquía de padres e hijos
     geometry.bones.forEach(boneInfo => {
       const bone = boneMap.get(boneInfo.name);
       if (!bone) return;
+
       if (boneInfo.parent && boneMap.has(boneInfo.parent)) {
         boneMap.get(boneInfo.parent)!.add(bone);
       } else {
@@ -91,66 +67,109 @@ export class ModelParser {
       }
     });
     
-    // CORRECCIÓN 2: Ajustar las posiciones de los cubos dentro de cada bone
+    // PASO 3: Aplicar transformaciones y crear cubos
     geometry.bones.forEach(boneInfo => {
-      const bone = boneMap.get(boneInfo.name);
-      if (!bone || !boneInfo.cubes) return;
+      const boneGroup = boneMap.get(boneInfo.name);
+      if (!boneGroup) return;
       
-      boneInfo.cubes.forEach((cube) => {
-        const mesh = this.createCubeMesh(cube, geometry.description, texture, boneInfo.mirror, flipUvY);
-        const pivot = boneInfo.pivot || [0, 0, 0];
-        
-        const pivotX = isPlayerModel ? -pivot[0] : pivot[0];
-        // CAMBIO PRINCIPAL: Corregir la posición Y del mesh
-        const pivotY = pivot[1] / 16; // Sin inversión negativa
-        const pivotZ = pivot[2] / 16;
-        
-        mesh.position.set(pivotX / 16, -pivotY, -pivotZ);
-        bone.add(mesh);
-      });
+      // Aplicar pivot y rotación correctamente
+      this.applyBoneTransforms(boneGroup, boneInfo);
+      
+      // Crear cubos para este hueso
+      if (boneInfo.cubes) {
+        boneInfo.cubes.forEach((cubeInfo) => {
+          const mesh = this.createCubeMesh(cubeInfo, boneInfo, geometry.description, texture);
+          boneGroup.add(mesh);
+        });
+      }
     });
 
-    if (isPlayerModel) {
-      modelGroup.scale.x = -1;
-    }
+    // PASO 4: Escalar el modelo completo
+    const BEDROCK_SCALE = 1 / 16;
+    modelGroup.scale.set(BEDROCK_SCALE, BEDROCK_SCALE, BEDROCK_SCALE);
     
     return modelGroup;
+  }
+
+  private static applyBoneTransforms(boneGroup: THREE.Object3D, boneInfo: Bone): void {
+    const pivot = boneInfo.pivot || [0, 0, 0];
+    const rotation = boneInfo.rotation || [0, 0, 0];
+
+    // Convertir coordenadas de Bedrock a Three.js
+    // Bedrock: X derecha, Y arriba, Z hacia adelante
+    // Three.js: X derecha, Y arriba, Z hacia nosotros
+    
+    // Aplicar pivot - este es el punto alrededor del cual rota el hueso
+    boneGroup.position.set(
+      pivot[0],  // X permanece igual
+      pivot[1],  // Y permanece igual  
+      -pivot[2]  // Z se invierte
+    );
+
+    // Aplicar rotación
+    // Las rotaciones en Bedrock están en grados, Three.js usa radianes
+    boneGroup.rotation.set(
+      THREE.MathUtils.degToRad(-rotation[0]), // Pitch (X) se invierte
+      THREE.MathUtils.degToRad(-rotation[1]), // Yaw (Y) se invierte
+      THREE.MathUtils.degToRad(rotation[2])   // Roll (Z) permanece igual
+    );
   }
   
   private static createCubeMesh(
     cube: Cube, 
+    bone: Bone,
     description: any, 
-    texture: THREE.Texture | undefined, 
-    boneMirror: boolean | undefined,
-    flipUvY: boolean
+    texture: THREE.Texture | undefined,
   ): THREE.Mesh {
     const inflate = cube.inflate || 0;
-    //@ts-ignore
-    const size = (cube.size as number[]).map(s => s + inflate);
+    const size = cube.size;
     
-    const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
-    
-    // CORRECCIÓN 3: Ajustar la traslación del cubo
-    geometry.translate(
-        (cube.origin[0] + size[0] / 2),
-        (cube.origin[1] + size[1] / 2), // Mantener coordenadas originales
-        (cube.origin[2] + size[2] / 2)
+    const geometry = new THREE.BoxGeometry(
+      size[0] + inflate * 2, 
+      size[1] + inflate * 2, 
+      size[2] + inflate * 2
     );
     
-    // CORRECCIÓN 4: Aplicar escala uniforme
-    geometry.scale(1 / 16, 1 / 16, 1 / 16);
+    // CORRECCIÓN CLAVE: Posicionamiento del cubo relativo al pivot del hueso
+    const origin = cube.origin || [0, 0, 0];
+    const pivot = bone.pivot || [0, 0, 0];
+    
+    // Calcular posición del centro del cubo
+    const cubeCenter = [
+      origin[0] + size[0] / 2,
+      origin[1] + size[1] / 2, 
+      origin[2] + size[2] / 2
+    ];
+    
+    // Posición relativa al pivot del hueso
+    const relativePosition = [
+      cubeCenter[0] - pivot[0],
+      cubeCenter[1] - pivot[1],
+      cubeCenter[2] - pivot[2]
+    ];
+    
+    // Aplicar transformación de coordenadas Bedrock -> Three.js
+    geometry.translate(
+      relativePosition[0],   // X permanece igual
+      relativePosition[1],   // Y permanece igual
+      -relativePosition[2]   // Z se invierte
+    );
 
+    // Crear material
     let material: THREE.Material;
     if (texture && cube.uv) {
-      let advancedUVs = isSimpleUV(cube.uv) ? this.convertSimpleToAdvancedUV(cube) : cube.uv as AdvancedUV;
+      const flipY = true;
+      let advancedUVs = isSimpleUV(cube.uv) 
+        ? this.convertSimpleToAdvancedUV(cube) 
+        : cube.uv as AdvancedUV;
 
       this.applyAdvancedUVMapping(
-        geometry, 
-        advancedUVs, 
-        description.texture_width, 
-        description.texture_height, 
-        cube.mirror || boneMirror,
-        flipUvY
+        geometry,
+        advancedUVs,
+        description.texture_width,
+        description.texture_height,
+        cube.mirror || bone.mirror,
+        flipY
       );
 
       material = new THREE.MeshLambertMaterial({
@@ -160,10 +179,18 @@ export class ModelParser {
         side: THREE.FrontSide,
       });
     } else {
-      material = new THREE.MeshLambertMaterial({ color: 0xcccccc, wireframe: true });
+      material = new THREE.MeshLambertMaterial({ 
+        color: 0xcccccc, 
+        wireframe: false,
+        transparent: true,
+        opacity: 0.8
+      });
     }
 
-    return new THREE.Mesh(geometry, material);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = `${bone.name}_cube`;
+    
+    return mesh;
   }
 
   private static convertSimpleToAdvancedUV(cube: Cube): AdvancedUV {
@@ -275,5 +302,26 @@ export class ModelParser {
         uvAttribute.setXY(baseIndex + 3, maxU, minV);
         break;
     }
+  }
+
+  // Método de utilidad para debugging
+  static debugBoneHierarchy(modelGroup: THREE.Group): void {
+    console.log('=== JERARQUÍA DE HUESOS ===');
+    
+    function printBone(obj: THREE.Object3D, indent: string = '') {
+      console.log(`${indent}${obj.name || 'unnamed'}`);
+      console.log(`${indent}  Position: (${obj.position.x.toFixed(2)}, ${obj.position.y.toFixed(2)}, ${obj.position.z.toFixed(2)})`);
+      console.log(`${indent}  Rotation: (${THREE.MathUtils.radToDeg(obj.rotation.x).toFixed(1)}°, ${THREE.MathUtils.radToDeg(obj.rotation.y).toFixed(1)}°, ${THREE.MathUtils.radToDeg(obj.rotation.z).toFixed(1)}°)`);
+      console.log(`${indent}  Children: ${obj.children.length}`);
+      
+      obj.children.forEach(child => {
+        if (child instanceof THREE.Group) {
+          printBone(child, indent + '  ');
+        }
+      });
+    }
+    
+    printBone(modelGroup);
+    console.log('========================');
   }
 }
